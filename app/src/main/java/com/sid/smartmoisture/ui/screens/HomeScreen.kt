@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.sid.smartmoisture.R
+import com.sid.smartmoisture.ui.components.CollapsibleCard
 import com.sid.smartmoisture.ui.components.Sparkline
 import com.sid.smartmoisture.viewmodel.MainViewModel
 
@@ -47,19 +48,19 @@ import com.sid.smartmoisture.viewmodel.MainViewModel
 fun HomeScreen(
     vm: MainViewModel, onOpenLog: () -> Unit, onOpenEquations: () -> Unit, onOpenScan: () -> Unit
 ) {
-    val log by vm.log.collectAsState()
     val selected by vm.selected.collectAsState()
-    val currentMs by vm.sampleMs.collectAsState()
     val readings by vm.readings.collectAsState()
     val devices by vm.devices.collectAsState()
     val connected by vm.connected.collectAsState()
+    val temp by vm.latestTempC.collectAsState()
+    val deviceRate by vm.deviceRateSec.collectAsState()
+    val samplingEnabled by vm.deviceSampling.collectAsState()
 
-    val raw = readings.lastOrNull()?.rawValue
-    val computed = raw?.let { vm.computeInstant(it) }
-    val spark = readings.mapNotNull { it.rawValue }.takeLast(20)
-    val temp = log.lastOrNull()?.text?.split(" ")?.getOrNull(0)?.toFloatOrNull()
+    val raw = readings.lastOrNull()?.moistureRaw
+    val computed = raw?.toDouble()?.let { vm.computeInstant(it) }
+    val spark = readings.mapNotNull { it.moistureRaw?.toDouble() }.takeLast(20)
 
-    var inputText by remember { mutableStateOf((currentMs / 1000).toString()) }
+    var inputText by remember(deviceRate) { mutableStateOf(deviceRate.toString()) }
     var isError by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
@@ -139,9 +140,11 @@ fun HomeScreen(
                     ) {
                         Column {
                             Text("Raw", style = MaterialTheme.typography.labelMedium)
-                            Text(raw?.let { "%.2f".format(it) } ?: "--",
+                            Text(
+                                raw?.toString() ?: "--",
                                 style = MaterialTheme.typography.headlineSmall,
-                                fontFamily = FontFamily.Monospace)
+                                fontFamily = FontFamily.Monospace
+                            )
                         }
                         Column(horizontalAlignment = Alignment.End) {
                             Text(
@@ -192,7 +195,9 @@ fun HomeScreen(
                             } else isError = true
 
                             newValue.toLongOrNull()?.let { seconds ->
-                                vm.setSampleMs(seconds * 1000)
+                                if (!isError && newValue.isNotEmpty() && seconds != deviceRate) vm.cmdRate(
+                                    seconds
+                                )
                             }
                         },
                         label = { Text("Sampling Interval (s)") },
@@ -201,6 +206,27 @@ fun HomeScreen(
                         isError = isError,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                     )
+                }
+            }
+            CollapsibleCard(
+                modifier = Modifier.fillMaxWidth(),
+                title = { Text("Device Controls", style = MaterialTheme.typography.titleMedium) }) {
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                ) {
+                    FilledTonalButton(
+                        onClick = { if (samplingEnabled) vm.cmdStop() else vm.cmdStart() },
+                        enabled = connected != null
+                    ) {
+                        Text(if (samplingEnabled) "Stop Sampling" else "Start Sampling")
+                    }
+                    OutlinedButton(
+                        onClick = { vm.cmdGet() }, enabled = connected != null
+                    ) { Text("Get") }
+                    OutlinedButton(
+                        onClick = { vm.cmdReset() }, enabled = connected != null
+                    ) { Text("Reset") }
                 }
             }
             ElevatedCard(modifier = Modifier.fillMaxWidth()) {

@@ -1,6 +1,7 @@
 package com.sid.smartmoisture.ui.screens
 
 import android.text.format.DateFormat
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -31,7 +32,7 @@ import com.sid.smartmoisture.viewmodel.MainViewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogScreen(vm: MainViewModel, onBack: () -> Unit) {
-    val log by vm.log.collectAsState()
+    val readings by vm.readings.collectAsState()
     val listState = rememberLazyListState()
 
     Scaffold(
@@ -52,23 +53,35 @@ fun LogScreen(vm: MainViewModel, onBack: () -> Unit) {
                 .padding(pad)
                 .padding(12.dp), state = listState
         ) {
-            itemsIndexed(
-                items = log, key = { _, item -> item.id }) { idx, item ->
-                val formattedTime = remember(item.time) {
-                    DateFormat.format("dd-MM-yyyy HH:mm:ss.SSS", item.time).toString()
+            itemsIndexed(items = readings, key = { _, item -> item.t }) { idx, item ->
+                val formattedTime = remember(item.t) {
+                    DateFormat.format("dd-MM-yyyy HH:mm:ss", item.t).toString()
                 }
 
                 ListItem(headlineContent = {
-                    Text(item.text)
+                    Text(
+                        item.rawLine,
+                        color = if (item.checksumOk) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.error
+                    )
                 }, supportingContent = {
-                    Text(formattedTime)
+                    Column {
+                        Text(formattedTime)
+                        if (!item.checksumOk) Text(
+                            "Checksum mismatch",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }, trailingContent = {
-                    Text("#${idx + 1}")
+                    Text(
+                        "#${idx + 1}", style = MaterialTheme.typography.bodySmall
+                    )
                 })
                 HorizontalDivider(Modifier.padding(vertical = 2.dp))
             }
         }
-        if (log.isEmpty()) Text(
+        if (readings.isEmpty()) Text(
             "No logs available",
             modifier = Modifier
                 .fillMaxSize()

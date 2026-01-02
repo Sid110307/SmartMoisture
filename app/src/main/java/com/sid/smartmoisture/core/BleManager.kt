@@ -28,6 +28,7 @@ data class ScannedDevice(val name: String?, val address: String, val rssi: Int)
 class BleManager(private val context: Context) {
     private val deviceUuid = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
     private val rxUuid = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
+    private val txUuid = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
     private val descriptorUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     private val adapter: BluetoothAdapter?
@@ -36,6 +37,7 @@ class BleManager(private val context: Context) {
 
     private var gatt: BluetoothGatt? = null
     private var rxChar: BluetoothGattCharacteristic? = null
+    private var txChar: BluetoothGattCharacteristic? = null
 
     private val _lines = MutableSharedFlow<String>(
         replay = 0, extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -150,6 +152,32 @@ class BleManager(private val context: Context) {
         }
     }
 
+    @Suppress("DEPRECATION")
+    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    fun sendCommand(command: String) {
+        if (!hasConnectPermission()) return
+
+        val gatt = this@BleManager.gatt ?: return
+        val txChar = this@BleManager.txChar ?: return
+        val cmd = command.trim()
+        if (cmd.isEmpty()) return
+
+        val payload = "${cmd}*${checksum(cmd)}\r\n".toByteArray(Charsets.US_ASCII)
+
+        try {
+            if (Build.VERSION.SDK_INT >= 33) gatt.writeCharacteristic(
+                txChar, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            )
+            else {
+                txChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                txChar.value = payload
+                gatt.writeCharacteristic(txChar)
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "writeCommand failed")
+        }
+    }
+
     private val gattCb = object : BluetoothGattCallback() {
         @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
@@ -181,6 +209,10 @@ class BleManager(private val context: Context) {
                 Timber.e("No RX characteristic found")
                 return
             }
+            txChar = service.getCharacteristic(txUuid) ?: run {
+                Timber.e("No TX characteristic found")
+                return
+            }
 
             enableNotify(gatt, rxChar)
             _connected.tryEmit(gatt.device.address)
@@ -209,6 +241,14 @@ class BleManager(private val context: Context) {
     private fun cleanupGatt() {
         gatt = null
         rxChar = null
+        txChar = null
+    }
+
+    private fun checksum(input: String): String {
+        var x = 0
+
+        input.toByteArray(Charsets.US_ASCII).forEach { b -> x = x xor (b.toInt() and 0xFF) }
+        return x.toString(16).uppercase().padStart(2, '0')
     }
 
     @Suppress("DEPRECATION")

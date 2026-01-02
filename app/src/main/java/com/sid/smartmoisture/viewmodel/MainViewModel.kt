@@ -15,14 +15,18 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import net.objecthunter.exp4j.ExpressionBuilder
 import timber.log.Timber
 
-data class LogLine(val id: Long, val text: String, val time: Long)
-data class Reading(val t: Long, val rawLine: String, val rawValue: Double?)
+data class Reading(
+    val t: Long,
+    val seq: Long?,
+    val tempC: Double?,
+    val moistureRaw: Int?,
+    val checksumOk: Boolean,
+    val rawLine: String
+)
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidViewModel(app) {
@@ -30,17 +34,20 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
     private val repo by lazy { EquationRepo(db.equationDao()) }
     private val ble by lazy { BleManager(getApplication()) }
 
-    private val _log = MutableStateFlow<List<LogLine>>(emptyList())
-    val log: StateFlow<List<LogLine>> = _log
-
     private val _equations = MutableStateFlow<List<Equation>>(emptyList())
     val equations: StateFlow<List<Equation>> = _equations
 
     private val _selected: MutableStateFlow<Equation?> = MutableStateFlow(null)
     val selected: StateFlow<Equation?> = _selected
 
-    private val _sampleMs = MutableStateFlow(1000L)
-    val sampleMs: StateFlow<Long> = _sampleMs
+    private val _latestTempC = MutableStateFlow<Double?>(null)
+    val latestTempC: StateFlow<Double?> = _latestTempC
+
+    private val _deviceRateSec = MutableStateFlow(1L)
+    val deviceRateSec: StateFlow<Long> = _deviceRateSec
+
+    private val _deviceSampling = MutableStateFlow(true)
+    val deviceSampling: StateFlow<Boolean> = _deviceSampling
 
     private val _readings = MutableStateFlow<List<Reading>>(emptyList())
     val readings: StateFlow<List<Reading>> = _readings
@@ -52,14 +59,12 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
     val connected: StateFlow<String?> = _connected
 
     private var prevRaw: Double? = null
-    private var logCounter = 0L
 
     init {
         if (!previewMode) {
             viewModelScope.launch { loadEquations() }
             viewModelScope.launch {
-                _sampleMs.flatMapLatest { periodMs -> ble.lines.sample(periodMs) }.collect { line ->
-                    appendLog(line)
+                ble.lines.collect { line ->
                     addReading(line)
                 }
             }
@@ -73,15 +78,15 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
                 Equation(id = 2, name = "Quadratic", formula = "x^2")
             )
             _selected.value = _equations.value.first()
-            _log.value = listOf(
-                LogLine(1, "10.00 C Soil 1234.56", System.currentTimeMillis() - 60000L),
-                LogLine(2, "10.50 C Soil 1235.00", System.currentTimeMillis() - 55000L),
-                LogLine(3, "11.00 C Soil 1235.50", System.currentTimeMillis() - 50000L)
-            )
-            logCounter = _log.value.size.toLong()
             _readings.value = List(10) { i ->
-                val v = Math.random() * i / 10.0
-                Reading(System.currentTimeMillis() - (10 - i) * 1000L, "Value: $v", v)
+                Reading(
+                    t = System.currentTimeMillis() - (10 - i) * 1000L,
+                    seq = i.toLong(),
+                    tempC = 10.0 + i,
+                    moistureRaw = 1200 + i * 10,
+                    checksumOk = true,
+                    rawLine = """{"s":$i,"t":${10.0 + i},"m":${1200 + i * 10}}*${checksum("""{"s":$i,"t":${10.0 + i},"m":${1200 + i * 10}}""")}"""
+                )
             }.reversed()
             _devices.value = listOf(
                 ScannedDevice("Sensor 1", "AA:BB:CC:DD:EE:01", -50),
@@ -98,10 +103,7 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
         if (ActivityCompat.checkSelfPermission(
                 getApplication(), Manifest.permission.BLUETOOTH_SCAN
             ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            appendLog("No BLUETOOTH_SCAN permission")
-            return
-        }
+        ) return
         ble.startScan(force)
     }
 
@@ -109,10 +111,7 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
         if (ActivityCompat.checkSelfPermission(
                 getApplication(), Manifest.permission.BLUETOOTH_SCAN
             ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            appendLog("No BLUETOOTH_SCAN permission")
-            return
-        }
+        ) return
         ble.stopScan()
     }
 
@@ -120,10 +119,7 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
         if (ActivityCompat.checkSelfPermission(
                 getApplication(), Manifest.permission.BLUETOOTH_CONNECT
             ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            appendLog("No BLUETOOTH_CONNECT permission")
-            return
-        }
+        ) return
         ble.connect(address)
     }
 
@@ -131,32 +127,85 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
         if (ActivityCompat.checkSelfPermission(
                 getApplication(), Manifest.permission.BLUETOOTH_CONNECT
             ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            appendLog("No BLUETOOTH_CONNECT permission")
-            return
-        }
+        ) return
         ble.disconnect()
     }
 
-    fun setSampleMs(ms: Long) {
-        _sampleMs.value = ms
+    fun cmdStart() {
+        if (ActivityCompat.checkSelfPermission(
+                getApplication(), Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+
+        ble.sendCommand("START")
+        _deviceSampling.value = true
     }
 
-    private fun appendLog(line: String) {
-        _log.value = (_log.value + LogLine(
-            id = ++logCounter, text = line, time = System.currentTimeMillis()
-        )).takeLast(100)
+    fun cmdStop() {
+        if (ActivityCompat.checkSelfPermission(
+                getApplication(), Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+
+        ble.sendCommand("STOP")
+        _deviceSampling.value = false
+    }
+
+    fun cmdRate(seconds: Long) {
+        if (ActivityCompat.checkSelfPermission(
+                getApplication(), Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+
+        val s = seconds.coerceIn(1, 3600)
+        if (_deviceRateSec.value == s) return
+
+        ble.sendCommand("RATE $s")
+        _deviceRateSec.value = s
+    }
+
+    fun cmdGet() {
+        if (ActivityCompat.checkSelfPermission(
+                getApplication(), Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+        ble.sendCommand("GET")
+    }
+
+    fun cmdReset() {
+        if (ActivityCompat.checkSelfPermission(
+                getApplication(), Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED
+        ) return
+        ble.sendCommand("RESET")
     }
 
     private fun addReading(line: String) {
+        val sample = parseSampleFrame(line)
+        if (sample != null) {
+            _latestTempC.value = sample.t
+            _readings.value = (_readings.value + Reading(
+                t = System.currentTimeMillis(),
+                seq = sample.s,
+                tempC = sample.t,
+                moistureRaw = sample.m,
+                checksumOk = sample.ok,
+                rawLine = line
+            )).takeLast(1000)
+
+            return
+        }
+
+        if (line.startsWith("OK")) parseGetOkLine(line)
         _readings.value = (_readings.value + Reading(
-            System.currentTimeMillis(), line, extractLastNumber(line)
+            t = System.currentTimeMillis(),
+            seq = null,
+            tempC = null,
+            moistureRaw = null,
+            checksumOk = true,
+            rawLine = line
         )).takeLast(1000)
     }
-
-    private fun extractLastNumber(s: String): Double? =
-        Regex("([-+]?[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)").findAll(s).toList()
-            .lastOrNull()?.value?.toDoubleOrNull()
 
     fun validateFormula(text: String, x: Double, xp: Double, dx: Double): Pair<Double?, String?> =
         try {
@@ -227,6 +276,62 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
         }
 
     private fun loadEquations() = viewModelScope.launch { _equations.value = repo.list() }
+
+    private data class ParsedSample(val s: Long, val t: Double, val m: Int, val ok: Boolean)
+
+    private fun parseSampleFrame(line: String): ParsedSample? {
+        val star = line.lastIndexOf('*')
+        if (star <= 0 || star + 3 > line.length) return null
+
+        val payload = line.take(star).trim()
+        val hh = line.substring(star + 1).trim().take(2).uppercase()
+        if (hh.length != 2) return null
+        val expected = checksum(payload)
+        val ok = (hh == expected)
+
+        fun findLong(key: String): Long? =
+            Regex("\"$key\"\\s*:\\s*([0-9]+)").find(payload)?.groupValues?.getOrNull(1)
+                ?.toLongOrNull()
+
+        fun findDouble(key: String): Double? =
+            Regex("\"$key\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)").find(payload)?.groupValues?.getOrNull(
+                1
+            )?.toDoubleOrNull()
+
+        val s = findLong("s") ?: return null
+        val t = findDouble("t") ?: return null
+        val m = findLong("m")?.toInt() ?: return null
+
+        return ParsedSample(s, t, m, ok)
+    }
+
+    private fun parseGetOkLine(line: String) {
+        if (!line.startsWith("OK")) return
+
+        val s = Regex("\\bs:(\\d+)").find(line)?.groupValues?.getOrNull(1)?.toLongOrNull()
+        val t = Regex("\\bt:([-+]?[0-9]*\\.?[0-9]+)").find(line)?.groupValues?.getOrNull(1)
+            ?.toDoubleOrNull()
+        val m = Regex("\\bm:(\\d+)").find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val r = Regex("\\br:(\\d+)").find(line)?.groupValues?.getOrNull(1)?.toLongOrNull()
+
+        if (t != null) _latestTempC.value = t
+        if (r != null) _deviceRateSec.value = r
+        if (s != null && t != null && m != null) _readings.value = (_readings.value + Reading(
+            t = System.currentTimeMillis(),
+            seq = s,
+            tempC = t,
+            moistureRaw = m,
+            checksumOk = true,
+            rawLine = line
+        )).takeLast(1000)
+    }
+
+    private fun checksum(input: String): String {
+        var x = 0
+
+        input.toByteArray(Charsets.US_ASCII).forEach { b -> x = x xor (b.toInt() and 0xFF) }
+        return x.toString(16).uppercase().padStart(2, '0')
+    }
 
     companion object {
         fun preview() = MainViewModel(Application(), true)
