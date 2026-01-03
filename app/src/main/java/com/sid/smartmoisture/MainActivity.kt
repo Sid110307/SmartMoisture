@@ -1,11 +1,15 @@
 package com.sid.smartmoisture
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions
 import androidx.activity.viewModels
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -27,14 +31,23 @@ import com.sid.smartmoisture.viewmodel.MainViewModel
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
-    private val permissionLauncher = registerForActivityResult(RequestMultiplePermissions()) { }
+    private val permissionLauncher =
+        registerForActivityResult(RequestMultiplePermissions()) { result ->
+            val granted =
+                if (Build.VERSION.SDK_INT >= 31) result[Manifest.permission.BLUETOOTH_SCAN] == true && result[Manifest.permission.BLUETOOTH_CONNECT] == true
+                else result[Manifest.permission.ACCESS_FINE_LOCATION] == true || result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+
+            if (granted && isBluetoothOn()) vm.startScan(true)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         enableEdgeToEdge()
-        requestBlePerms()
         setContent { SmartMoistureApp(vm) }
+
+        if (!isBluetoothOn()) enableBtLauncher.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
+        else requestBlePerms()
     }
 
     private fun requestBlePerms() {
@@ -48,6 +61,17 @@ class MainActivity : ComponentActivity() {
         }
 
         permissionLauncher.launch(perms.toTypedArray())
+    }
+
+    private val enableBtLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            requestBlePerms()
+            vm.startScan(true)
+        }
+
+    private fun isBluetoothOn(): Boolean {
+        val mgr = getSystemService(BLUETOOTH_SERVICE) as BluetoothManager
+        return mgr.adapter?.isEnabled == true
     }
 }
 

@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import com.sid.smartmoisture.R
 import com.sid.smartmoisture.core.ScannedDevice
 import com.sid.smartmoisture.viewmodel.MainViewModel
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -62,6 +63,12 @@ fun ScanScreen(vm: MainViewModel, onConnected: () -> Unit) {
 
     LaunchedEffect(connected) { if (connected == busy || connected == null) busy = null }
     LaunchedEffect(Unit) { vm.startScan() }
+    LaunchedEffect(busy) {
+        val addr = busy ?: return@LaunchedEffect
+
+        delay(10000)
+        if (busy == addr && connected != addr) busy = null
+    }
     DisposableEffect(Unit) { onDispose { vm.stopScan() } }
 
     Scaffold(topBar = {

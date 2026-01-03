@@ -26,9 +26,9 @@ import java.util.UUID
 data class ScannedDevice(val name: String?, val address: String, val rssi: Int)
 
 class BleManager(private val context: Context) {
-    private val deviceUuid = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
-    private val rxUuid = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
-    private val txUuid = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
+    private val deviceUuid = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9f")
+    private val rxUuid = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9f")
+    private val txUuid = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9f")
     private val descriptorUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
     private val adapter: BluetoothAdapter?
@@ -131,25 +131,37 @@ class BleManager(private val context: Context) {
         if (!hasConnectPermission() || !requireBluetoothOn()) return
         try {
             stopScan()
+
+            gatt?.disconnect()
+            gatt?.close()
+            cleanupGatt()
             _connected.tryEmit(null)
+
             val dev = adapter?.getRemoteDevice(address) ?: return
-            dev.connectGatt(context.applicationContext, false, gattCb, BluetoothDevice.TRANSPORT_LE)
+            gatt = dev.connectGatt(
+                context.applicationContext, false, gattCb, BluetoothDevice.TRANSPORT_LE
+            )
         } catch (_: SecurityException) {
-            Timber.e("connect: security exception")
+            Timber.e("connect failed")
         }
     }
 
     @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN])
     fun disconnect() {
         if (!hasConnectPermission()) return
+
         stopScan()
         gatt?.let {
             try {
                 it.disconnect()
+                it.close()
             } catch (_: Exception) {
                 Timber.e("disconnect failed")
             }
         }
+
+        _connected.tryEmit(null)
+        cleanupGatt()
     }
 
     @Suppress("DEPRECATION")
@@ -163,6 +175,7 @@ class BleManager(private val context: Context) {
         if (cmd.isEmpty()) return
 
         val payload = "${cmd}*${checksum(cmd)}\r\n".toByteArray(Charsets.US_ASCII)
+        Timber.e("Sending command: $cmd")
 
         try {
             if (Build.VERSION.SDK_INT >= 33) gatt.writeCharacteristic(
@@ -183,6 +196,19 @@ class BleManager(private val context: Context) {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (!hasConnectPermission()) return
 
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Timber.e("Connection state change error: status=$status newState=$newState")
+                try {
+                    gatt.close()
+                } catch (_: Exception) {
+                }
+
+                _connected.tryEmit(null)
+                cleanupGatt()
+
+                return
+            }
+
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 gatt.discoverServices()
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
@@ -191,6 +217,7 @@ class BleManager(private val context: Context) {
                 } catch (_: Exception) {
                     Timber.e("gatt.close failed")
                 }
+
                 _connected.tryEmit(null)
                 cleanupGatt()
             }
@@ -198,7 +225,17 @@ class BleManager(private val context: Context) {
 
         @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) return
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Timber.e("Service discovery failed: status=$status")
+                try {
+                    gatt.close()
+                } catch (_: Exception) {
+                }
+
+                _connected.tryEmit(null)
+                cleanupGatt()
+                return
+            }
             this@BleManager.gatt = gatt
 
             val service = gatt.getService(deviceUuid) ?: run {
@@ -235,6 +272,7 @@ class BleManager(private val context: Context) {
     private fun handleIncoming(bytes: ByteArray) =
         bytes.toString(Charsets.UTF_8).split('\n').forEach { raw ->
             val line = raw.trim()
+            Timber.e("Received line: $line")
             if (line.isNotEmpty()) _lines.tryEmit(line)
         }
 

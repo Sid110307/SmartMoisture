@@ -70,8 +70,6 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
             }
             viewModelScope.launch { ble.devices.collect { list -> _devices.value = list } }
             viewModelScope.launch { ble.connected.collect { addr -> _connected.value = addr } }
-
-            startScan()
         } else {
             _equations.value = listOf(
                 Equation(id = 1, name = "Linear", formula = "2*x+1"),
