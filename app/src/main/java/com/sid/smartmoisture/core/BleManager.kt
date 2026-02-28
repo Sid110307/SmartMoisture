@@ -40,6 +40,7 @@ class BleManager(private val context: Context) {
     private var gatt: BluetoothGatt? = null
     private var rxChar: BluetoothGattCharacteristic? = null
     private var txChar: BluetoothGattCharacteristic? = null
+    private val rxBuf = StringBuilder(256)
 
     private val _lines = MutableSharedFlow<String>(
         replay = 0, extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -296,12 +297,33 @@ class BleManager(private val context: Context) {
         }
     }
 
-    private fun handleIncoming(bytes: ByteArray) =
-        bytes.toString(Charsets.UTF_8).split('\n').forEach { raw ->
-            val line = raw.trim()
-            Timber.e("Received line: $line")
-            if (line.isNotEmpty()) _lines.tryEmit(line)
+    private fun handleIncoming(bytes: ByteArray) {
+        val payloadLength = 18
+        rxBuf.append(bytes.toString(Charsets.US_ASCII))
+        if (rxBuf.length > 1024) rxBuf.delete(0, rxBuf.length - 200)
+
+        while (true) {
+            val start = rxBuf.indexOf("S")
+            if (start < 0) {
+                rxBuf.setLength(0)
+                return
+            }
+
+            if (start > 0) rxBuf.delete(0, start)
+            if (rxBuf.length < payloadLength) return
+
+            val s = rxBuf.substring(0, payloadLength)
+            if (s.length != payloadLength || s[0] != 'S' || s[4] != 'T' || s[10] != 'M' || s[15] != '*') {
+                rxBuf.delete(0, 1)
+                continue
+            }
+            _lines.tryEmit(s)
+
+            var consume = payloadLength
+            if (rxBuf.length >= consume + 2 && rxBuf[consume] == '\r' && rxBuf[consume + 1] == '\n') consume += 2
+            rxBuf.delete(0, consume)
         }
+    }
 
     private fun cleanupGatt() {
         gatt = null

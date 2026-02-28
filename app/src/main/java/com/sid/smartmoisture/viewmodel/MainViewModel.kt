@@ -83,7 +83,9 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
                     tempC = 10.0 + i,
                     moistureRaw = 1200 + i * 10,
                     checksumOk = true,
-                    rawLine = """{"s":$i,"t":${10.0 + i},"m":${1200 + i * 10}}*${checksum("""{"s":$i,"t":${10.0 + i},"m":${1200 + i * 10}}""")}"""
+                    rawLine = "S%03dT%+05dM%04d*%s".format(
+                        i, ((10.0 + i) * 100).toInt(), 1200 + i * 10, "00"
+                    )
                 )
             }.reversed()
             _devices.value = listOf(
@@ -278,29 +280,19 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
     private data class ParsedSample(val s: Long, val t: Double, val m: Int, val ok: Boolean)
 
     private fun parseSampleFrame(line: String): ParsedSample? {
-        val star = line.lastIndexOf('*')
-        if (star <= 0 || star + 3 > line.length) return null
+        val trimmed = line.trim()
+        val star = trimmed.lastIndexOf('*')
+        if (star <= 0 || star + 3 > trimmed.length) return null
 
-        val payload = line.take(star).trim()
-        val hh = line.substring(star + 1).trim().take(2).uppercase()
-        if (hh.length != 2) return null
-        val expected = checksum(payload)
-        val ok = (hh == expected)
+        val payload = trimmed.substring(0, star)
+        val hh = trimmed.substring(star + 1, star + 3).uppercase()
+        if (payload.length != 15 || payload[0] != 'S' || payload[4] != 'T' || payload[10] != 'M') return null
 
-        fun findLong(key: String): Long? =
-            Regex("\"$key\"\\s*:\\s*([0-9]+)").find(payload)?.groupValues?.getOrNull(1)
-                ?.toLongOrNull()
+        val s = payload.substring(1, 4).toLongOrNull() ?: return null
+        val t = payload.substring(5, 10).toIntOrNull() ?: return null
+        val m = payload.substring(11, 15).toIntOrNull() ?: return null
 
-        fun findDouble(key: String): Double? =
-            Regex("\"$key\"\\s*:\\s*([-+]?[0-9]*\\.?[0-9]+)").find(payload)?.groupValues?.getOrNull(
-                1
-            )?.toDoubleOrNull()
-
-        val s = findLong("s") ?: return null
-        val t = findDouble("t") ?: return null
-        val m = findLong("m")?.toInt() ?: return null
-
-        return ParsedSample(s, t, m, ok)
+        return ParsedSample(s = s, t = t / 100.0, m = m, ok = hh == checksum(payload))
     }
 
     private fun parseGetOkLine(line: String) {
