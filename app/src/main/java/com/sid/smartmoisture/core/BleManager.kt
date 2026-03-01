@@ -209,11 +209,25 @@ class BleManager(private val context: Context) {
     }
 
     private val gattCb = object : BluetoothGattCallback() {
-        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN])
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             if (!isCurrent(gatt) || !hasConnectPermission()) return
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                if (status == 133) {
+                    try {
+                        gatt.close()
+                    } catch (_: Exception) {
+                    }
+
+                    cleanupGatt()
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        connect(gatt.device.address)
+                    }, 1000L)
+
+                    return
+                }
+
                 Timber.e("Connection state change error: status=$status newState=$newState")
                 try {
                     gatt.close()
