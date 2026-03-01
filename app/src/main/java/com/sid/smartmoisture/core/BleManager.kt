@@ -137,21 +137,32 @@ class BleManager(private val context: Context) {
     @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN])
     fun connect(address: String) {
         if (!hasConnectPermission() || !requireBluetoothOn()) return
-        try {
-            stopScan()
+        stopScan()
 
-            gatt?.disconnect()
-            gatt?.close()
-            cleanupGatt()
-            _connected.tryEmit(null)
-
-            val dev = adapter?.getRemoteDevice(address) ?: return
-            gatt = dev.connectGatt(
-                context.applicationContext, false, gattCb, BluetoothDevice.TRANSPORT_LE
-            )
-        } catch (_: SecurityException) {
-            Timber.e("connect failed")
+        gatt?.run {
+            try {
+                disconnect()
+                close()
+            } catch (_: Exception) {
+                Timber.e("disconnect failed")
+            }
         }
+        cleanupGatt()
+        _connected.tryEmit(null)
+
+        val dev = adapter?.getRemoteDevice(address) ?: return
+        Handler(Looper.getMainLooper()).postDelayed({
+            try {
+                gatt = dev.connectGatt(
+                    context.applicationContext,
+                    false,
+                    gattCb,
+                    BluetoothDevice.TRANSPORT_LE
+                )
+            } catch (e: Exception) {
+                Timber.e(e, "connectGatt failed")
+            }
+        }, 300L)
     }
 
     @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN])
@@ -182,7 +193,7 @@ class BleManager(private val context: Context) {
         val cmd = command.trim()
         if (cmd.isEmpty()) return
 
-        val payload = "${cmd}*${checksum(cmd)}\r\n".toByteArray(Charsets.US_ASCII)
+        val payload = "${cmd}*${checksum(cmd)}".toByteArray(Charsets.US_ASCII)
         try {
             if (Build.VERSION.SDK_INT >= 33) gatt.writeCharacteristic(
                 txChar, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
