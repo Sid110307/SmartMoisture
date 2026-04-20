@@ -10,6 +10,7 @@ import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -17,6 +18,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelUuid
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
 import kotlinx.coroutines.channels.BufferOverflow
@@ -59,8 +61,9 @@ class BleManager(private val context: Context) {
     val connected: SharedFlow<String?> = _connected
 
     private var lastScanStartMs = 0L
+    private var retryCount = 0
 
-    private fun isCurrent(g: BluetoothGatt) = (g == this@BleManager.gatt)
+    private fun isCurrent(g: BluetoothGatt) = g == this@BleManager.gatt
     private fun requireBluetoothOn(): Boolean = adapter?.isEnabled == true
     private fun hasConnectPermission(): Boolean =
         if (Build.VERSION.SDK_INT >= 31) ActivityCompat.checkSelfPermission(
@@ -108,10 +111,9 @@ class BleManager(private val context: Context) {
     @RequiresPermission(Manifest.permission.BLUETOOTH_SCAN)
     fun startScan(force: Boolean = false) {
         val now = System.currentTimeMillis()
-        if (!force && now - lastScanStartMs < 5000) return
-        lastScanStartMs = now
+        if (!force && (gatt != null || now - lastScanStartMs < 5000) || !hasScanPermission() || !requireBluetoothOn()) return
 
-        if (gatt != null || (!force && (!hasScanPermission() || !requireBluetoothOn()))) return
+        lastScanStartMs = now
         try {
             scanner?.stopScan(scanCb)
         } catch (_: Exception) {
@@ -122,7 +124,8 @@ class BleManager(private val context: Context) {
         _devices.tryEmit(emptyList())
 
         val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_BALANCED).build()
-        scanner?.startScan(emptyList(), settings, scanCb)
+        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(deviceUuid)).build()
+        scanner?.startScan(listOf(filter), settings, scanCb)
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_SCAN)
@@ -154,10 +157,7 @@ class BleManager(private val context: Context) {
         Handler(Looper.getMainLooper()).postDelayed({
             try {
                 gatt = dev.connectGatt(
-                    context.applicationContext,
-                    false,
-                    gattCb,
-                    BluetoothDevice.TRANSPORT_LE
+                    context.applicationContext, false, gattCb, BluetoothDevice.TRANSPORT_LE
                 )
             } catch (e: Exception) {
                 Timber.e(e, "connectGatt failed")
@@ -169,7 +169,6 @@ class BleManager(private val context: Context) {
     fun disconnect() {
         if (!hasConnectPermission()) return
 
-        stopScan()
         gatt?.let {
             try {
                 it.disconnect()
@@ -193,13 +192,15 @@ class BleManager(private val context: Context) {
         val cmd = command.trim()
         if (cmd.isEmpty()) return
 
+        val writeType =
+            if (txChar.properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+
         val payload = "${cmd}*${checksum(cmd)}".toByteArray(Charsets.US_ASCII)
         try {
-            if (Build.VERSION.SDK_INT >= 33) gatt.writeCharacteristic(
-                txChar, payload, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            )
+            if (Build.VERSION.SDK_INT >= 33) gatt.writeCharacteristic(txChar, payload, writeType)
             else {
-                txChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                txChar.writeType = writeType
                 txChar.value = payload
                 gatt.writeCharacteristic(txChar)
             }
@@ -215,17 +216,18 @@ class BleManager(private val context: Context) {
 
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 if (status == 133) {
-                    try {
-                        gatt.close()
-                    } catch (_: Exception) {
+                    if (retryCount < 3) {
+                        retryCount++
+                        cleanupGatt()
+                        Handler(Looper.getMainLooper()).postDelayed(
+                            { connect(gatt.device.address) }, 1000L
+                        )
+                    } else {
+                        retryCount = 0
+                        _connected.tryEmit(null)
+                        cleanupGatt()
+                        Timber.e("Connection failed with status 133 after 3 retries")
                     }
-
-                    cleanupGatt()
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        connect(gatt.device.address)
-                    }, 1000L)
-
-                    return
                 }
 
                 Timber.e("Connection state change error: status=$status newState=$newState")
@@ -282,11 +284,21 @@ class BleManager(private val context: Context) {
                 return
             }
 
+            gatt.requestMtu(512)
+            retryCount = 0
+        }
+
+        @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (!isCurrent(gatt) || !hasConnectPermission()) return
+
+            Timber.e("MTU changed: mtu=$mtu status=$status")
             Handler(Looper.getMainLooper()).postDelayed({
                 if (this@BleManager.gatt == gatt) enableNotify(gatt, rxChar)
             }, 300L)
         }
 
+        @Deprecated("Deprecated in Java")
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, c: BluetoothGattCharacteristic) {
             if (!isCurrent(gatt) || c.uuid != rxUuid) return
@@ -319,6 +331,12 @@ class BleManager(private val context: Context) {
                 _connected.tryEmit(null)
                 cleanupGatt()
             }
+        }
+
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int
+        ) {
+            if (status != BluetoothGatt.GATT_SUCCESS) Timber.e("Write failed: status=$status uuid=${characteristic.uuid}")
         }
     }
 
@@ -356,13 +374,6 @@ class BleManager(private val context: Context) {
         txChar = null
     }
 
-    private fun checksum(input: String): String {
-        var x = 0
-
-        input.toByteArray(Charsets.US_ASCII).forEach { b -> x = x xor (b.toInt() and 0xFF) }
-        return x.toString(16).uppercase().padStart(2, '0')
-    }
-
     @Suppress("DEPRECATION")
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
     private fun enableNotify(gatt: BluetoothGatt, c: BluetoothGattCharacteristic?) {
@@ -377,6 +388,15 @@ class BleManager(private val context: Context) {
         ) else {
             desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
             gatt.writeDescriptor(desc)
+        }
+    }
+
+    companion object {
+        fun checksum(input: String): String {
+            var x = 0
+            input.toByteArray(Charsets.US_ASCII).forEach { b -> x = x xor (b.toInt() and 0xFF) }
+
+            return x.toString(16).uppercase().padStart(2, '0')
         }
     }
 }

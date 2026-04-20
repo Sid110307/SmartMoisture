@@ -96,17 +96,14 @@ private fun EquationRow(
 ) {
     var showDialog by remember { mutableStateOf(false) }
     if (showDialog) AlertDialog(
-        onDismissRequest = { showDialog = false },
+        onDismissRequest = {},
         title = { Text("Delete Equation") },
         text = { Text("Are you sure you want to delete \"${e.name}\"?") },
         confirmButton = {
-            FilledTonalButton(onClick = {
-                showDialog = false
-                onDelete()
-            }) { Text("Delete") }
+            FilledTonalButton(onClick = { onDelete() }) { Text("Delete") }
         },
         dismissButton = {
-            OutlinedButton(onClick = { showDialog = false }) { Text("Cancel") }
+            OutlinedButton(onClick = {}) { Text("Cancel") }
         })
 
     ElevatedCard {
@@ -131,7 +128,7 @@ private fun EquationRow(
                             modifier = Modifier.height(24.dp)
                         )
                     }
-                    IconButton(onClick = { showDialog = true }) {
+                    IconButton(onClick = {}) {
                         Icon(
                             painter = painterResource(id = R.drawable.trash),
                             contentDescription = "Delete",

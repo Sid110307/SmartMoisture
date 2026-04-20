@@ -53,7 +53,7 @@ fun LogScreen(vm: MainViewModel, onBack: () -> Unit) {
                 .padding(pad)
                 .padding(12.dp), state = listState
         ) {
-            itemsIndexed(items = readings, key = { _, item -> item.t }) { idx, item ->
+            itemsIndexed(items = readings, key = { _, item -> item.id }) { idx, item ->
                 val formattedTime = remember(item.t) {
                     DateFormat.format("dd-MM-yyyy HH:mm:ss", item.t).toString()
                 }

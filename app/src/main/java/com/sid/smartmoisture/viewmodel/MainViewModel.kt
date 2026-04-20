@@ -20,6 +20,7 @@ import net.objecthunter.exp4j.ExpressionBuilder
 import timber.log.Timber
 
 data class Reading(
+    val id: Long = System.nanoTime(),
     val t: Long,
     val seq: Long?,
     val tempC: Double?,
@@ -99,6 +100,14 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
 
     constructor(app: Application) : this(app, false)
 
+    override fun onCleared() {
+        super.onCleared()
+        if (ActivityCompat.checkSelfPermission(
+                getApplication(), Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+        ) ble.disconnect()
+    }
+
     fun startScan(force: Boolean = false) {
         if (ActivityCompat.checkSelfPermission(
                 getApplication(), Manifest.permission.BLUETOOTH_SCAN
@@ -118,6 +127,8 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
     fun connectTo(address: String) {
         if (ActivityCompat.checkSelfPermission(
                 getApplication(), Manifest.permission.BLUETOOTH_CONNECT
+            ) != PackageManager.PERMISSION_GRANTED || ActivityCompat.checkSelfPermission(
+                getApplication(), Manifest.permission.BLUETOOTH_SCAN
             ) != PackageManager.PERMISSION_GRANTED
         ) return
         ble.connect(address)
@@ -196,7 +207,10 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
             return
         }
 
-        if (line.startsWith("OK")) parseGetOkLine(line)
+        if (line.startsWith("OK")) {
+            parseGetOkLine(line)
+            return
+        }
         _readings.value = (_readings.value + Reading(
             t = System.currentTimeMillis(),
             seq = null,
@@ -292,7 +306,7 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
         val t = payload.substring(5, 10).toIntOrNull() ?: return null
         val m = payload.substring(11, 15).toIntOrNull() ?: return null
 
-        return ParsedSample(s = s, t = t / 100.0, m = m, ok = hh == checksum(payload))
+        return ParsedSample(s = s, t = t / 100.0, m = m, ok = hh == BleManager.checksum(payload))
     }
 
     private fun parseGetOkLine(line: String) {
@@ -314,13 +328,6 @@ class MainViewModel(app: Application, previewMode: Boolean = false) : AndroidVie
             checksumOk = true,
             rawLine = line
         )).takeLast(1000)
-    }
-
-    private fun checksum(input: String): String {
-        var x = 0
-
-        input.toByteArray(Charsets.US_ASCII).forEach { b -> x = x xor (b.toInt() and 0xFF) }
-        return x.toString(16).uppercase().padStart(2, '0')
     }
 
     companion object {
